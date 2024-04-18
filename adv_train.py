@@ -164,21 +164,49 @@ def fast_adapt(batch, learner, loss, adaptation_steps, shots, ways, device):
 
     data, labels = batch
     data, labels = data.to(device), labels.to(device)
+
+
+    # Perform weak and strong data augmentation
+    weak_augment = transforms.Compose([
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(10),
+    ])
+    
+    strong_augment = transforms.Compose([
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(20),
+        transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.2),
+        transforms.RandomGrayscale(p=0.2),
+    ])
+    
+    # Apply weak augmentation to adaptation data and strong augmentation to evaluation data
+
+
     # Separate data into adaptation/evalutation sets
     adaptation_indices = torch.zeros(data.size(0)).byte()
     adaptation_indices[torch.arange(shots*ways) * 2] = 1
     adaptation_data, adaptation_labels = data[adaptation_indices], labels[adaptation_indices]
     evaluation_data, evaluation_labels = data[1 - adaptation_indices], labels[1 - adaptation_indices]
     
-    
-    # Adapt the model
+    support_weak_data= weak_augment(adaptation_data) # Support set augmentation
+
+    query_weak_data = weak_augment(evaluation_data)
+    query_strong_data = strong_augment(evaluation_data) # Query set strong augmentation
+    # Loop through the specified number of adaptation steps to adapt the model
     for step in range(adaptation_steps):
-        train_error = loss(learner(adaptation_data), adaptation_labels)
+        # Initialize Kullback-Leibler divergence loss with batch mean reduction
+        kl_loss = nn.KLDivLoss(reduction='batchmean')
+        # Calculate KL divergence between support set's weakly augmented and unaltered data
+
+        kl_loss_minimization = kl_loss(F.log_softmax(learner(adaptation_data), dim=1), F.softmax(learner(support_weak_data), dim=1))
+        # Calculate the total meta loss as the sum of the classification loss and KL divergence loss
+        train_error = loss(learner(adaptation_data), adaptation_labels) + kl_loss_minimization
         train_error /= len(adaptation_data)
         learner.adapt(train_error)
-    # Evaluate the adapted model
+    
+    # After adaptation, evaluate the adapted model on evaluation data
     predictions = learner(evaluation_data)
-    valid_error = loss(predictions, evaluation_labels)
+    valid_error = loss(predictions, evaluation_labels) +kl_loss(F.log_softmax(learner(query_weak_data), dim=1), F.softmax(learner(query_strong_data), dim=1))
     valid_error /= len(evaluation_data)
     valid_accuracy = accuracy(predictions, evaluation_labels)
     
